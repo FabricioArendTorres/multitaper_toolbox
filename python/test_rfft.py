@@ -1,29 +1,42 @@
 """Regression test: verify rfft optimization matches original fft output."""
 
 import numpy as np
+import pytest
 from scipy.signal import chirp
 from multitaper_spectrogram_python import multitaper_spectrogram
 
 
-def test_rfft_matches_fft():
-    """Verify rfft implementation produces identical output to fft version."""
+@pytest.fixture
+def data_and_fs():
+    """Shared test data and sampling frequency."""
     np.random.seed(42)
     fs = 200
     t = np.arange(1 / fs, 10, 1 / fs)
     data = chirp(t, 1, t[-1], 20, "logarithmic")
+    return data, fs
 
-    kwargs = {
+
+@pytest.fixture
+def base_kwargs():
+    """Base kwargs shared across all tests."""
+    return {
         "frequency_range": [0, 50],
         "time_bandwidth": 3,
         "num_tapers": 5,
         "window_params": [2, 0.5],
         "min_nfft": 256,
         "detrend_opt": "constant",
-        "multiprocess": False,
-        "weighting": "unity",
         "plot_on": False,
         "verbose": False,
     }
+
+
+@pytest.mark.parametrize("weighting", ["unity", "eigen", "adapt"])
+@pytest.mark.parametrize("multiprocess", [False, True])
+def test_rfft_matches_fft(data_and_fs, base_kwargs, weighting, multiprocess):
+    """Verify rfft implementation produces identical output to fft version for all weighting schemes."""
+    data, fs = data_and_fs
+    kwargs = {**base_kwargs, "weighting": weighting, "multiprocess": multiprocess}
 
     result_fft, _, _ = multitaper_spectrogram(data, fs, **kwargs)
     result_rfft, _, _ = multitaper_spectrogram(data, fs, use_rfft=True, **kwargs)
@@ -32,4 +45,4 @@ def test_rfft_matches_fft():
 
 
 if __name__ == "__main__":
-    test_rfft_matches_fft()
+    pytest.main([__file__, "-v"])
