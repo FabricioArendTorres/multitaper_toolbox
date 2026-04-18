@@ -550,7 +550,7 @@ def calc_mts_segment_rfft(
         data_segment = detrend(data_segment, type=detrend_opt)
 
     # Multiply data by dpss tapers (STEP 2)
-    tapered_data = np.multiply(np.asmatrix(data_segment).T, np.asmatrix(dpss_tapers.T))
+    tapered_data = data_segment[:, np.newaxis] * dpss_tapers.T
 
     # Compute the rFFT - returns only positive frequencies (STEP 3)
     rfft_data = np.fft.rfft(tapered_data, nfft, axis=0)
