@@ -164,7 +164,11 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
         mt_spectrogram = np.vstack([mt_spectrogram[dc_select, :], 2*mt_spectrogram[select, :],
                                 mt_spectrogram[nyquist_select, :]]) / fs
     else:
-        mt_spectrogram = mt_spectrogram / fs
+        # RFFT: apply 2x factor for non-DC/Nyquist (positive freqs have symmetric counterparts in 2-sided FFT)
+        # NOTE: last entry is NOT nyquist.
+        non_dc_nyquist = ~(np.isclose(sfreqs, 0) | np.isclose(sfreqs, fs/2))
+        mt_spectrogram[non_dc_nyquist] *= 2 
+        mt_spectrogram /= fs 
 
     # Flip if requested
     if xyflip:
