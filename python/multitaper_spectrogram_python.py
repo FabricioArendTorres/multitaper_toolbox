@@ -540,7 +540,7 @@ def calc_mts_segment_rfft(
         ret.fill(0)
         return ret
 
-    if any(np.isnan(data_segment)):
+    if np.isnan(data_segment).any():
         ret = np.empty(sum(freq_inds))
         ret.fill(np.nan)
         return ret
