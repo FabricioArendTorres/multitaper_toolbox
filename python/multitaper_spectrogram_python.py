@@ -16,7 +16,8 @@ import matplotlib.pyplot as plt
 # MULTITAPER SPECTROGRAM #
 def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num_tapers=None, window_params=None,
                            min_nfft=0, detrend_opt='linear', multiprocess=False, n_jobs=None, weighting='unity',
-                           plot_on=True, return_fig=False, clim_scale=True, verbose=True, xyflip=False, ax=None):
+                           plot_on=True, return_fig=False, clim_scale=True, verbose=True, xyflip=False, ax=None,
+                           use_rfft=False):
     """ Compute multitaper spectrogram of timeseries data
     Usage:
     mt_spectrogram, stimes, sfreqs = multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5,
@@ -109,7 +110,7 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
 
     # Set up spectrogram parameters
     [window_idxs, stimes, sfreqs, freq_inds] = process_spectrogram_params(fs, nfft, frequency_range, window_start,
-                                                                          winsize_samples)
+                                                                          winsize_samples, use_rfft=use_rfft)
     # Display spectrogram parameters
     if verbose:
         display_spectrogram_props(fs, time_bandwidth, num_tapers, [winsize_samples, winstep_samples], frequency_range,
@@ -142,22 +143,28 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
     # Set up calc_mts_segment() input arguments
     mts_params = (dpss_tapers, nfft, freq_inds, detrend_opt, num_tapers, dpss_eigen, weighting, wt)
 
+    # swap out function to be used for rfft alternative
+    mts_func = calc_mts_segment_rfft if use_rfft else calc_mts_segment
+
     if multiprocess:  # use multiprocessing
         n_jobs = max(cpu_count() - 1, 1) if n_jobs is None else n_jobs
-        mt_spectrogram = np.vstack(Parallel(n_jobs=n_jobs)(delayed(calc_mts_segment)(
+        mt_spectrogram = np.vstack(Parallel(n_jobs=n_jobs)(delayed(mts_func)(
             data_segments[num_window, :], *mts_params) for num_window in range(num_windows)))
 
     else:  # if no multiprocessing, compute normally
-        mt_spectrogram = np.apply_along_axis(calc_mts_segment, 1, data_segments, *mts_params)
+        mt_spectrogram = np.apply_along_axis(mts_func, 1, data_segments, *mts_params)
 
     # Compute one-sided PSD spectrum
     mt_spectrogram = mt_spectrogram.T
-    dc_select = np.where(sfreqs == 0)[0]
-    nyquist_select = np.where(sfreqs == fs/2)[0]
-    select = np.setdiff1d(np.arange(0, len(sfreqs)), np.concatenate((dc_select, nyquist_select)))
+    if not use_rfft:
+        dc_select = np.where(sfreqs == 0)[0]
+        nyquist_select = np.where(sfreqs == fs/2)[0]
+        select = np.setdiff1d(np.arange(0, len(sfreqs)), np.concatenate((dc_select, nyquist_select)))
 
-    mt_spectrogram = np.vstack([mt_spectrogram[dc_select, :], 2*mt_spectrogram[select, :],
-                               mt_spectrogram[nyquist_select, :]]) / fs
+        mt_spectrogram = np.vstack([mt_spectrogram[dc_select, :], 2*mt_spectrogram[select, :],
+                                mt_spectrogram[nyquist_select, :]]) / fs
+    else:
+        mt_spectrogram = mt_spectrogram / fs
 
     # Flip if requested
     if xyflip:
@@ -326,7 +333,7 @@ def process_input(data, fs, frequency_range=None, time_bandwidth=5, num_tapers=N
 
 
 # PROCESS THE SPECTROGRAM PARAMETERS #
-def process_spectrogram_params(fs, nfft, frequency_range, window_start, datawin_size):
+def process_spectrogram_params(fs, nfft, frequency_range, window_start, datawin_size, use_rfft=False):
     """ Helper function to create frequency vector and window indices
         Arguments:
              fs (float): sampling frequency in Hz  -- required
@@ -345,13 +352,14 @@ def process_spectrogram_params(fs, nfft, frequency_range, window_start, datawin_
     """
 
     # create frequency vector
-    df = fs / nfft
-    sfreqs = np.arange(0, fs, df)
-
+    if use_rfft:
+        sfreqs = np.fft.rfftfreq(nfft, d=1/fs)  # nfft//2+1 points, 0 to fs/2
+    else:
+        df = fs / nfft
+        sfreqs = np.arange(0, fs, df)
     # Get frequencies for given frequency range
     freq_inds = (sfreqs >= frequency_range[0]) & (sfreqs <= frequency_range[1])
     sfreqs = sfreqs[freq_inds]
-
     # Compute times in the middle of each spectrum
     window_middle_samples = window_start + round(datawin_size / 2)
     stimes = window_middle_samples / fs
@@ -488,4 +496,92 @@ def calc_mts_segment(data_segment, dpss_tapers, nfft, freq_inds, detrend_opt, nu
         mt_spectrum = np.dot(spower, wt)
         mt_spectrum = np.reshape(mt_spectrum, nfft)  # reshape to 1D
 
+    return mt_spectrum[freq_inds]
+
+
+def calc_mts_segment_rfft(
+    data_segment,
+    dpss_tapers,
+    nfft,
+    freq_inds,
+    detrend_opt,
+    num_tapers,
+    dpss_eigen,
+    weighting,
+    wt,
+):
+    """Helper function to calculate the multitaper spectrum of a single segment of data using rfft.
+
+    This is an optimized version of calc_mts_segment that uses rfft instead of fft,
+    since for real-valued input the negative frequencies are redundant.
+
+    Arguments:
+        data_segment (1d np.array): One window worth of time-series data -- required
+        dpss_tapers (2d np.array): Parameters for the DPSS tapers to be used.
+                                   Dimensions are (num_tapers, winsize_samples) -- required
+        nfft (int): length of signal to calculate fft on -- required
+        freq_inds (1d np array): boolean array of which frequencies are being analyzed in
+                                  an array of frequencies from 0 to fs with steps of fs/nfft
+        detrend_opt (str): detrend data window ('linear' (default), 'constant', 'off')
+        num_tapers (int): number of tapers being used
+        dpss_eigen (np array): eigenvalues for the DPSS tapers
+        weighting (str): 'unity', 'eigen', or 'adapt'
+        wt (int or np array): taper weights
+
+    Returns:
+        mt_spectrum (1d np.array): spectral power for single window
+    """
+
+    # If segment has all zeros, return vector of zeros
+    if all(data_segment == 0):
+        ret = np.empty(sum(freq_inds))
+        ret.fill(0)
+        return ret
+
+    if any(np.isnan(data_segment)):
+        ret = np.empty(sum(freq_inds))
+        ret.fill(np.nan)
+        return ret
+
+    # Option to detrend data to remove low frequency DC component
+    if detrend_opt != "off":
+        data_segment = detrend(data_segment, type=detrend_opt)
+
+    # Multiply data by dpss tapers (STEP 2)
+    tapered_data = np.multiply(np.asmatrix(data_segment).T, np.asmatrix(dpss_tapers.T))
+
+    # Compute the rFFT - returns only positive frequencies (STEP 3)
+    rfft_data = np.fft.rfft(tapered_data, nfft, axis=0)
+
+    # Compute the weighted mean spectral power across tapers (STEP 4)
+    spower = np.abs(rfft_data) ** 2
+
+    if weighting == "adapt":
+        # adaptive weights - for colored noise spectrum (Percival & Walden p368-370)
+        tpower = np.dot(np.transpose(data_segment), (data_segment / len(data_segment)))
+        nfft_rfft = nfft // 2 + 1
+        spower_iter = np.mean(spower[:, 0:2], 1)
+        spower_iter = spower_iter[:, np.newaxis]
+        a = (1 - dpss_eigen) * tpower
+        for i in range(3):  # 3 iterations only
+            # Calc the MSE weights
+            b = np.dot(spower_iter, np.ones((1, num_tapers))) / (
+                (np.dot(spower_iter, np.transpose(dpss_eigen)))
+                + (np.ones((nfft_rfft, 1)) * np.transpose(a))
+            )
+            # Calc new spectral estimate
+            wk = (b**2) * np.dot(np.ones((nfft_rfft, 1)), np.transpose(dpss_eigen))
+            spower_iter = np.sum((np.transpose(wk) * np.transpose(spower)), 0) / np.sum(
+                wk, 1
+            )
+            spower_iter = spower_iter[:, np.newaxis]
+
+        mt_spectrum = np.squeeze(spower_iter)
+
+    else:
+        # eigenvalue or uniform weights
+        mt_spectrum = np.dot(spower, wt)
+        mt_spectrum = np.reshape(mt_spectrum, nfft // 2 + 1)  # reshape to 1D
+
+    
     return mt_spectrum[freq_inds]
