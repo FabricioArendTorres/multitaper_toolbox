@@ -1,6 +1,5 @@
 # Analysis Imports
 import math
-from typing_extensions import Literal
 import numpy as np
 from scipy.signal.windows import dpss
 from scipy.signal import detrend
@@ -8,11 +7,12 @@ from scipy.signal import detrend
 import warnings
 import timeit
 from joblib import Parallel, delayed, cpu_count
+from _spectrogram_worker import (fast_detrend, calc_mts_segment_optimized,
+                                 run_shm_multiprocess)
 # Visualization imports
 # noinspection PyUnresolvedReferences
 import colorcet  # this import is necessary to add rainbow colormap to matplotlib
 import matplotlib.pyplot as plt
-
 
 # MULTITAPER SPECTROGRAM #
 def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num_tapers=None, window_params=None,
@@ -149,8 +149,15 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
 
     if multiprocess:  # use multiprocessing
         n_jobs = max(cpu_count() - 1, 1) if n_jobs is None else n_jobs
-        mt_spectrogram = np.vstack(Parallel(n_jobs=n_jobs)(delayed(mts_func)(
-            data_segments[num_window, :], *mts_params) for num_window in range(num_windows)))
+        
+        if use_legacy:
+            # Legacy path: unchanged, uses original data_segments
+            mt_spectrogram = np.vstack(Parallel(n_jobs=n_jobs)(delayed(mts_func)(
+                data_segments[num_window, :], *mts_params) for num_window in range(num_windows)))
+        else:
+            # Optimized path: shared memory to avoid pickle overhead per worker
+            mt_spectrogram = run_shm_multiprocess(
+                data_segments, num_windows, winsize_samples, n_jobs, mts_params)
 
     else:  # if no multiprocessing, compute normally
         mt_spectrogram = np.apply_along_axis(mts_func, 1, data_segments, *mts_params)
@@ -192,7 +199,7 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
         dx = stimes[1] - stimes[0]
         dy = sfreqs[1] - sfreqs[0]
         extent = [stimes[0]-dx, stimes[-1]+dx, sfreqs[-1]+dy, sfreqs[0]-dy]
-
+    
         # Plot spectrogram
         if ax is None:
             fig, ax = plt.subplots()
@@ -501,155 +508,3 @@ def calc_mts_segment(data_segment, dpss_tapers, nfft, freq_inds, detrend_opt, nu
         mt_spectrum = np.reshape(mt_spectrum, nfft)  # reshape to 1D
 
     return mt_spectrum[freq_inds]
-
-def calc_mts_segment_optimized(
-    data_segment,
-    dpss_tapers,
-    nfft,
-    freq_inds,
-    detrend_opt,
-    num_tapers,
-    dpss_eigen,
-    weighting,
-    wt,
-):
-    """Helper function to calculate the multitaper spectrum of a single segment of data.
-
-    This is an optimized version of calc_mts_segment that uses rfft instead of fft,
-    since for real-valued input the negative frequencies are redundant.
-
-    Arguments:
-        data_segment (1d np.array): One window worth of time-series data -- required
-        dpss_tapers (2d np.array): Parameters for the DPSS tapers to be used.
-                                   Dimensions are (num_tapers, winsize_samples) -- required
-        nfft (int): length of signal to calculate fft on -- required
-        freq_inds (1d np array): boolean array of which frequencies are being analyzed in
-                                  an array of frequencies from 0 to fs with steps of fs/nfft
-        detrend_opt (str): detrend data window ('linear' (default), 'constant', 'off')
-        num_tapers (int): number of tapers being used
-        dpss_eigen (np array): eigenvalues for the DPSS tapers
-        weighting (str): 'unity', 'eigen', or 'adapt'
-        wt (int or np array): taper weights
-
-    Returns:
-        mt_spectrum (1d np.array): spectral power for single window
-    """
-
-    # If segment has all zeros, return vector of zeros
-    if all(data_segment == 0):
-        ret = np.empty(sum(freq_inds))
-        ret.fill(0)
-        return ret
-
-    if np.isnan(data_segment).any():
-        ret = np.empty(sum(freq_inds))
-        ret.fill(np.nan)
-        return ret
-
-    # Option to detrend data to remove low frequency DC component
-    if detrend_opt != "off":
-        data_segment = fast_detrend(data_segment, type=detrend_opt)
-
-    # Multiply data by dpss tapers (STEP 2)
-    tapered_data = data_segment[:, np.newaxis] * dpss_tapers.T
-
-    # Compute the rFFT - returns only positive frequencies (STEP 3)
-    rfft_data = np.fft.rfft(tapered_data, nfft, axis=0)
-
-    # Compute the weighted mean spectral power across tapers (STEP 4)
-    spower = np.abs(rfft_data) ** 2
-
-    if weighting == "adapt":
-        # adaptive weights - for colored noise spectrum (Percival & Walden p368-370)
-        tpower = np.dot(np.transpose(data_segment), (data_segment / len(data_segment)))
-        nfft_rfft = nfft // 2 + 1
-        spower_iter = np.mean(spower[:, 0:2], 1)
-        spower_iter = spower_iter[:, np.newaxis]
-        a = (1 - dpss_eigen) * tpower
-        for i in range(3):  # 3 iterations only
-            # Calc the MSE weights
-            # use broadcast_to to create zero-copy views
-            b = np.broadcast_to(spower_iter, (nfft_rfft, num_tapers))  / (
-                (np.dot(spower_iter, np.transpose(dpss_eigen)))
-                + np.broadcast_to(a.ravel(), (nfft_rfft, num_tapers))
-            )
-            # Calc new spectral estimate
-            wk = (b**2) * np.broadcast_to(dpss_eigen.ravel(), (nfft_rfft, num_tapers))  
-            #spower_iter = np.sum((np.transpose(wk) * np.transpose(spower)), 0) / np.sum(
-            #    wk, 1
-            #)
-            spower_iter =np.einsum('ij,ij->i', wk, spower) / np.sum(wk, 1)  # sums over j (axis 1), output shape (513,)
-            spower_iter = spower_iter[:, np.newaxis]
-
-        mt_spectrum = np.squeeze(spower_iter)
-
-    else:
-        # eigenvalue or uniform weights
-        mt_spectrum = np.dot(spower, wt)
-        mt_spectrum = np.reshape(mt_spectrum, nfft // 2 + 1)  # reshape to 1D
-
-    
-    return mt_spectrum[freq_inds]
-
-
-
-def fast_detrend(data : np.ndarray, type: Literal['linear', 'constant', 'off'] = 'linear') -> np.ndarray:
-    """
-    Remove a linear trend from the data.
-
-    This is a fast replacement for scipy.signal.detrend optimized for
-    spectrogram use cases where the function is called many times on
-    windowed data.
-    
-    Limited to 1D data.
-
-    Parameters
-    ----------
-    data : array_like
-        The input data (1D array).
-    type : {'linear', 'constant', 'off'}, optional
-        The type of detrending. If 'linear' (default), the result of
-        a linear least-squares fit is subtracted from the data.
-        If 'constant', only the mean of the data is subtracted.
-        If 'off', no detrending is applied.
-
-    Returns
-    -------
-    ret : ndarray
-        The detrended data with the same shape as the input.
-
-    Notes
-    -----
-    For 'linear' detrending, this function uses a closed-form OLS solution:
-
-        slope = Cov(t, y) / Var(t)
-        intercept = mean(y) - slope * mean(t)
-
-    This is significantly faster than scipy.signal.detrend which uses
-    np.polyfit() with LAPACK SVD decomposition for each call.
-
-    """
-    data = np.asarray(data, dtype=float)
-    n = data.shape[0]
-    
-    if type == 'linear':
-        t = np.arange(n, dtype=float)
-        t_mean = (n - 1) / 2.0
-        
-        # Compute means
-        data_mean = data.mean()
-        
-        # Compute variance of t (analytically: (n^2-1)/12 for centered t)
-        t_var = np.var(t)
-        
-        # Compute covariance and slope
-        slope = np.sum((t - t_mean) * data) / (n * t_var)
-        intercept = data_mean - slope * t_mean
-        
-        return data - (slope * t + intercept)
-    
-    elif type == 'constant':
-        return data - data.mean()
-    
-    else:  # 'off' or unrecognized
-        return data
