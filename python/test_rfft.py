@@ -33,15 +33,16 @@ def base_kwargs():
 
 @pytest.mark.parametrize("weighting", ["unity", "eigen", "adapt"])
 @pytest.mark.parametrize("multiprocess", [False, True])
-def test_rfft_matches_fft(data_and_fs, base_kwargs, weighting, multiprocess):
+@pytest.mark.parametrize("detrend_opt", ["off", "constant", "linear"])
+def test_rfft_matches_fft(data_and_fs, base_kwargs, weighting, multiprocess, detrend_opt):
     """Verify rfft implementation produces identical output to fft version for all weighting schemes."""
     data, fs = data_and_fs
-    kwargs = {**base_kwargs, "weighting": weighting, "multiprocess": multiprocess}
+    kwargs = {**base_kwargs, "weighting": weighting, "multiprocess": multiprocess, "detrend_opt": detrend_opt}
 
     result_fft, _, _ = multitaper_spectrogram(data, fs, **kwargs)
     result_rfft, _, _ = multitaper_spectrogram(data, fs, use_rfft=True, **kwargs)
 
-    np.testing.assert_allclose(result_fft, result_rfft, rtol=1e-10)
+    assert_allclose(result_fft, result_rfft, rtol=1e-10, atol=1e-12)
 
 
 if __name__ == "__main__":
