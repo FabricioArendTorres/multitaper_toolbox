@@ -567,15 +567,17 @@ def calc_mts_segment_rfft(
         a = (1 - dpss_eigen) * tpower
         for i in range(3):  # 3 iterations only
             # Calc the MSE weights
-            b = np.dot(spower_iter, np.ones((1, num_tapers))) / (
+            # use broadcast_to to create zero-copy views
+            b = np.broadcast_to(spower_iter, (nfft_rfft, num_tapers))  / (
                 (np.dot(spower_iter, np.transpose(dpss_eigen)))
-                + (np.ones((nfft_rfft, 1)) * np.transpose(a))
+                + np.broadcast_to(a.ravel(), (nfft_rfft, num_tapers))
             )
             # Calc new spectral estimate
-            wk = (b**2) * np.dot(np.ones((nfft_rfft, 1)), np.transpose(dpss_eigen))
-            spower_iter = np.sum((np.transpose(wk) * np.transpose(spower)), 0) / np.sum(
-                wk, 1
-            )
+            wk = (b**2) * np.broadcast_to(dpss_eigen.ravel(), (nfft_rfft, num_tapers))  
+            #spower_iter = np.sum((np.transpose(wk) * np.transpose(spower)), 0) / np.sum(
+            #    wk, 1
+            #)
+            spower_iter =np.einsum('ij,ij->i', wk, spower) / np.sum(wk, 1)  # sums over j (axis 1), output shape (513,)
             spower_iter = spower_iter[:, np.newaxis]
 
         mt_spectrum = np.squeeze(spower_iter)
