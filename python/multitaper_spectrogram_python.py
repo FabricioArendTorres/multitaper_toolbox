@@ -1,5 +1,6 @@
 # Analysis Imports
 import math
+from typing_extensions import Literal
 import numpy as np
 from scipy.signal.windows import dpss
 from scipy.signal import detrend
@@ -17,7 +18,7 @@ import matplotlib.pyplot as plt
 def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num_tapers=None, window_params=None,
                            min_nfft=0, detrend_opt='linear', multiprocess=False, n_jobs=None, weighting='unity',
                            plot_on=True, return_fig=False, clim_scale=True, verbose=True, xyflip=False, ax=None,
-                           use_rfft=False):
+                           use_legacy=False):
     """ Compute multitaper spectrogram of timeseries data
     Usage:
     mt_spectrogram, stimes, sfreqs = multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5,
@@ -110,7 +111,7 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
 
     # Set up spectrogram parameters
     [window_idxs, stimes, sfreqs, freq_inds] = process_spectrogram_params(fs, nfft, frequency_range, window_start,
-                                                                          winsize_samples, use_rfft=use_rfft)
+                                                                          winsize_samples, use_legacy=use_legacy)
     # Display spectrogram parameters
     if verbose:
         display_spectrogram_props(fs, time_bandwidth, num_tapers, [winsize_samples, winstep_samples], frequency_range,
@@ -143,8 +144,8 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
     # Set up calc_mts_segment() input arguments
     mts_params = (dpss_tapers, nfft, freq_inds, detrend_opt, num_tapers, dpss_eigen, weighting, wt)
 
-    # swap out function to be used for rfft alternative
-    mts_func = calc_mts_segment_rfft if use_rfft else calc_mts_segment
+    # swap out function to be used for optimized alternative
+    mts_func = calc_mts_segment if use_legacy else calc_mts_segment_optimized
 
     if multiprocess:  # use multiprocessing
         n_jobs = max(cpu_count() - 1, 1) if n_jobs is None else n_jobs
@@ -156,7 +157,7 @@ def multitaper_spectrogram(data, fs, frequency_range=None, time_bandwidth=5, num
 
     # Compute one-sided PSD spectrum
     mt_spectrogram = mt_spectrogram.T
-    if not use_rfft:
+    if use_legacy:
         dc_select = np.where(sfreqs == 0)[0]
         nyquist_select = np.where(sfreqs == fs/2)[0]
         select = np.setdiff1d(np.arange(0, len(sfreqs)), np.concatenate((dc_select, nyquist_select)))
@@ -337,7 +338,7 @@ def process_input(data, fs, frequency_range=None, time_bandwidth=5, num_tapers=N
 
 
 # PROCESS THE SPECTROGRAM PARAMETERS #
-def process_spectrogram_params(fs, nfft, frequency_range, window_start, datawin_size, use_rfft=False):
+def process_spectrogram_params(fs, nfft, frequency_range, window_start, datawin_size, use_legacy=False):
     """ Helper function to create frequency vector and window indices
         Arguments:
              fs (float): sampling frequency in Hz  -- required
@@ -356,7 +357,7 @@ def process_spectrogram_params(fs, nfft, frequency_range, window_start, datawin_
     """
 
     # create frequency vector
-    if use_rfft:
+    if not use_legacy:
         sfreqs = np.fft.rfftfreq(nfft, d=1/fs)  # nfft//2+1 points, 0 to fs/2
     else:
         df = fs / nfft
@@ -501,7 +502,7 @@ def calc_mts_segment(data_segment, dpss_tapers, nfft, freq_inds, detrend_opt, nu
 
     return mt_spectrum[freq_inds]
 
-def calc_mts_segment_rfft(
+def calc_mts_segment_optimized(
     data_segment,
     dpss_tapers,
     nfft,
@@ -512,7 +513,7 @@ def calc_mts_segment_rfft(
     weighting,
     wt,
 ):
-    """Helper function to calculate the multitaper spectrum of a single segment of data using rfft.
+    """Helper function to calculate the multitaper spectrum of a single segment of data.
 
     This is an optimized version of calc_mts_segment that uses rfft instead of fft,
     since for real-valued input the negative frequencies are redundant.
@@ -592,7 +593,7 @@ def calc_mts_segment_rfft(
 
 
 
-def fast_detrend(data, type='linear'):
+def fast_detrend(data : np.ndarray, type: Literal['linear', 'constant', 'off'] = 'linear') -> np.ndarray:
     """
     Remove a linear trend from the data.
 
