@@ -547,7 +547,7 @@ def calc_mts_segment_rfft(
 
     # Option to detrend data to remove low frequency DC component
     if detrend_opt != "off":
-        data_segment = detrend(data_segment, type=detrend_opt)
+        data_segment = fast_detrend(data_segment, type=detrend_opt)
 
     # Multiply data by dpss tapers (STEP 2)
     tapered_data = data_segment[:, np.newaxis] * dpss_tapers.T
@@ -589,3 +589,66 @@ def calc_mts_segment_rfft(
 
     
     return mt_spectrum[freq_inds]
+
+
+
+def fast_detrend(data, type='linear'):
+    """
+    Remove a linear trend from the data.
+
+    This is a fast replacement for scipy.signal.detrend optimized for
+    spectrogram use cases where the function is called many times on
+    windowed data.
+    
+    Limited to 1D data.
+
+    Parameters
+    ----------
+    data : array_like
+        The input data (1D array).
+    type : {'linear', 'constant', 'off'}, optional
+        The type of detrending. If 'linear' (default), the result of
+        a linear least-squares fit is subtracted from the data.
+        If 'constant', only the mean of the data is subtracted.
+        If 'off', no detrending is applied.
+
+    Returns
+    -------
+    ret : ndarray
+        The detrended data with the same shape as the input.
+
+    Notes
+    -----
+    For 'linear' detrending, this function uses a closed-form OLS solution:
+
+        slope = Cov(t, y) / Var(t)
+        intercept = mean(y) - slope * mean(t)
+
+    This is significantly faster than scipy.signal.detrend which uses
+    np.polyfit() with LAPACK SVD decomposition for each call.
+
+    """
+    data = np.asarray(data, dtype=float)
+    n = data.shape[0]
+    
+    if type == 'linear':
+        t = np.arange(n, dtype=float)
+        t_mean = (n - 1) / 2.0
+        
+        # Compute means
+        data_mean = data.mean()
+        
+        # Compute variance of t (analytically: (n^2-1)/12 for centered t)
+        t_var = np.var(t)
+        
+        # Compute covariance and slope
+        slope = np.sum((t - t_mean) * data) / (n * t_var)
+        intercept = data_mean - slope * t_mean
+        
+        return data - (slope * t + intercept)
+    
+    elif type == 'constant':
+        return data - data.mean()
+    
+    else:  # 'off' or unrecognized
+        return data

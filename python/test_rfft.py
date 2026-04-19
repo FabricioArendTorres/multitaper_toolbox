@@ -3,8 +3,10 @@
 import numpy as np
 import pytest
 from scipy.signal import chirp
-from multitaper_spectrogram_python import multitaper_spectrogram
-
+from multitaper_spectrogram_python import multitaper_spectrogram, fast_detrend
+from scipy.signal import detrend as scipy_detrend
+from numpy.testing import assert_allclose
+import timeit
 
 @pytest.fixture
 def data_and_fs():
@@ -25,10 +27,10 @@ def base_kwargs():
         "num_tapers": 5,
         "window_params": [2, 0.5],
         "min_nfft": 256,
-        "detrend_opt": "constant",
         "plot_on": False,
         "verbose": False,
     }
+
 
 
 @pytest.mark.parametrize("weighting", ["unity", "eigen", "adapt"])
